@@ -30,6 +30,10 @@ public class KerberosTicketCache {
     private final String krb5ConfPath;
     private final String ticketCachePath;
     private LoginContext loginContext;
+    private Thread refreshThread;
+    private volatile boolean isRefreshing = false;
+    private long refreshIntervalMs = 10000; // Default 10 seconds
+    private long expirationThresholdMs = 10000; // Check for refresh when less than 10 seconds left
 
     public KerberosTicketCache(String principal, String keytabPath, String krb5ConfPath, String ticketCachePath) {
         this.principal = principal;
@@ -237,6 +241,7 @@ public class KerberosTicketCache {
     }
 
     public void logout() throws LoginException {
+        stopPeriodicRefresh();
         if (loginContext != null) {
             loginContext.logout();
         }
@@ -249,11 +254,84 @@ public class KerberosTicketCache {
         return Subject.doAs(loginContext.getSubject(), action);
     }
 
+    public void stopPeriodicRefresh() {
+        isRefreshing = false;
+        if (refreshThread != null) {
+            refreshThread.interrupt();
+            refreshThread = null;
+        }
+    }
+
+    public void setRefreshInterval(long intervalMs) {
+        if (intervalMs < 1000) { // Minimum 1 second
+            throw new IllegalArgumentException("Refresh interval must be at least 1 second");
+        }
+        this.refreshIntervalMs = intervalMs;
+    }
+
+    public void setExpirationThreshold(long thresholdMs) {
+        if (thresholdMs < 1000) { // Minimum 1 second
+            throw new IllegalArgumentException("Expiration threshold must be at least 1 second");
+        }
+        this.expirationThresholdMs = thresholdMs;
+    }
+
+    public void startPeriodicRefresh() {
+        if (isRefreshing) {
+            return;
+        }
+        isRefreshing = true;
+        
+        refreshThread = new Thread(() -> {
+            while (isRefreshing) {
+                try {
+                    // Get current ticket from subject
+                    Subject subject = loginContext.getSubject();
+                    Set<KerberosTicket> tickets = subject.getPrivateCredentials(KerberosTicket.class);
+                    
+                    if (!tickets.isEmpty()) {
+                        KerberosTicket tgt = tickets.iterator().next();
+                        long now = System.currentTimeMillis();
+                        long timeRemaining = tgt.getEndTime().getTime() - now;
+                        
+                        // If ticket is about to expire (less than threshold) or has expired
+                        if (timeRemaining < expirationThresholdMs) {
+                            System.out.println("Ticket is about to expire (remaining: " + timeRemaining/1000 + " seconds), refreshing...");
+                            if (keytabPath != null) {
+                                login(); // If we have keytab, do a fresh login
+                            } else {
+                                loginWithCache(); // Otherwise try to renew from cache
+                            }
+                            System.out.println("Successfully refreshed ticket");
+                        }
+                    }
+                    
+                    Thread.sleep(refreshIntervalMs);
+                } catch (Exception e) {
+                    System.err.println("Error during ticket refresh: " + e.getMessage());
+                    try {
+                        Thread.sleep(10000); // Wait 10 seconds before retry on error
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+        });
+        
+        refreshThread.setDaemon(true);
+        refreshThread.setName("KerberosTicketRefresher");
+        refreshThread.start();
+    }
+
     public static void main(String[] args) {
         try {
             // Set up test paths
             String baseDir = System.getProperty("user.dir") + "/kerberos/cache";
             String ticketCachePath = baseDir + "/krb5cc_test";
+            String principal = "hdfs/master-1-1.c-0596176698bd4d17.cn-beijing.emr.aliyuncs.com@EMR.C-0596176698BD4D17.COM";
+            String keytabPath = "/Users/morningman/workspace/git/kerberos-client/kerberos/hdfs.keytab";
+            String krb5ConfPath = "/Users/morningman/workspace/git/kerberos-client/kerberos/krb5.conf";
 
             // Clean up and create cache directory
             File cacheDir = new File(baseDir);
@@ -267,52 +345,105 @@ public class KerberosTicketCache {
             }
             cacheDir.mkdirs();
 
-            // Step 1: Create client and login with keytab
-            System.out.println("\n=== Step 1: Login with Keytab ===");
-            KerberosTicketCache client1 = new KerberosTicketCache(
-                "hdfs/master-1-1.c-0596176698bd4d17.cn-beijing.emr.aliyuncs.com@EMR.C-0596176698BD4D17.COM",
-                "/Users/morningman/workspace/git/kerberos-client/kerberos/hdfs.keytab",
-                "/Users/morningman/workspace/git/kerberos-client/kerberos/krb5.conf",
+            // Step 1: Create initial ticket cache using keytab
+            System.out.println("\n=== Step 1: Creating ticket cache using keytab ===");
+            KerberosTicketCache initialClient = new KerberosTicketCache(
+                principal,
+                keytabPath,
+                krb5ConfPath,
                 ticketCachePath
             );
 
-            // Login with keytab and create ticket cache
             System.out.println("Logging in with keytab...");
-            client1.login();
+            initialClient.login();
             System.out.println("Successfully created ticket cache at: " + ticketCachePath);
-
-            // Test the credentials
-            client1.doAs(() -> {
-                System.out.println("Successfully executed privileged action with keytab credentials");
+            
+            // Test initial credentials
+            initialClient.doAs(() -> {
+                System.out.println("Testing initial credentials - Executing privileged action");
                 return null;
             });
 
-            client1.logout();
+            // Logout initial client
+            System.out.println("Logging out initial client...");
+            initialClient.logout();
 
-            // Step 2: Create new client and login with cached ticket
-            System.out.println("\n=== Step 2: Login with Cached Ticket ===");
-            KerberosTicketCache client2 = new KerberosTicketCache(
-                "hdfs/master-1-1.c-0596176698bd4d17.cn-beijing.emr.aliyuncs.com@EMR.C-0596176698BD4D17.COM",
-                null,  // No keytab needed
-                "/Users/morningman/workspace/git/kerberos-client/kerberos/krb5.conf",
+            // Step 2: Create new client using ticket cache
+            System.out.println("\n=== Step 2: Creating new client with ticket cache ===");
+            KerberosTicketCache cacheClient = new KerberosTicketCache(
+                principal,
+                null,  // No keytab
+                krb5ConfPath,
                 ticketCachePath
             );
 
-            // Login using cached ticket
             System.out.println("Logging in with ticket cache...");
-            client2.loginWithCache();
+            cacheClient.loginWithCache();
             System.out.println("Successfully logged in using ticket cache");
 
-            // Test the credentials
-            client2.doAs(() -> {
-                System.out.println("Successfully executed privileged action with cached credentials");
-                return null;
-            });
+            // Step 3: Start periodic refresh and monitoring
+            System.out.println("\n=== Step 3: Starting periodic refresh and monitoring ===");
+            
+            // Set refresh interval to 10 seconds for testing
+            cacheClient.setRefreshInterval(10000);
+            cacheClient.setExpirationThreshold(10000);
+            System.out.println("Starting periodic refresh with 10 seconds interval...");
+            cacheClient.startPeriodicRefresh();
 
-            client2.logout();
+            // Monitor for 2 minutes
+            for (int i = 0; i < 12; i++) {
+                System.out.println("\nCheck " + i + " (10s interval):");
+                
+                try {
+                    // Test the credentials
+                    cacheClient.doAs(() -> {
+                        System.out.println("Testing credentials - Executing privileged action");
+                        
+                        // Get and print current ticket info
+                        Subject subject = cacheClient.getLoginContext().getSubject();
+                        Set<KerberosTicket> tickets = subject.getPrivateCredentials(KerberosTicket.class);
+                        if (!tickets.isEmpty()) {
+                            KerberosTicket tgt = tickets.iterator().next();
+                            System.out.println("Current ticket info:");
+                            System.out.println("  Client: " + tgt.getClient());
+                            System.out.println("  Server: " + tgt.getServer());
+                            System.out.println("  Valid from: " + tgt.getStartTime());
+                            System.out.println("  Valid until: " + tgt.getEndTime());
+                            if (tgt.getRenewTill() != null) {
+                                System.out.println("  Renewable until: " + tgt.getRenewTill());
+                            }
+                            long timeRemaining = tgt.getEndTime().getTime() - System.currentTimeMillis();
+                            System.out.println("  Time remaining: " + timeRemaining/1000 + " seconds");
+                        } else {
+                            System.out.println("WARNING: No valid tickets found!");
+                        }
+                        return null;
+                    });
+                } catch (Exception e) {
+                    System.err.println("ERROR: Failed to execute privileged action: " + e.getMessage());
+                }
+
+                // Check if ticket cache file still exists
+                File ticketFile = new File(ticketCachePath);
+                if (!ticketFile.exists()) {
+                    System.err.println("ERROR: Ticket cache file has been deleted or moved!");
+                }
+
+                // Wait for 10 seconds
+                Thread.sleep(10000);
+            }
+
+            System.out.println("\nTest completed. Cleaning up...");
+            cacheClient.logout();
 
         } catch (Exception e) {
+            System.err.println("Test failed with error:");
             e.printStackTrace();
         }
+    }
+
+    // Add getter for loginContext to support testing
+    protected LoginContext getLoginContext() {
+        return loginContext;
     }
 } 
