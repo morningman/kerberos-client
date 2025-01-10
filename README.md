@@ -32,6 +32,7 @@
 - 支持使用keytab登录并缓存ticket
 - 支持使用已缓存的ticket进行登录
 - 减少对keytab文件的访问次数
+- 支持从配置文件自动加载配置
 
 ### KerberosSubjectHolder
 
@@ -81,14 +82,11 @@ try {
 
 ### 3. 使用缓存的示例
 
+#### 3.1 使用配置文件（推荐）
+
 ```java
-// 创建带缓存的客户端实例
-CachedKerberosClient client = new CachedKerberosClient(
-    "user@REALM.COM",
-    "/path/to/user.keytab",
-    "/etc/krb5.conf",
-    "/tmp/krb5cc_" + System.getProperty("user.name")
-);
+// 从配置文件创建客户端实例
+CachedKerberosClient client = new CachedKerberosClient();
 
 try {
     // 首次使用keytab登录并缓存ticket
@@ -117,12 +115,32 @@ try {
 }
 ```
 
+#### 3.2 手动配置
+
+```java
+// 手动创建带缓存的客户端实例
+CachedKerberosClient client = new CachedKerberosClient(
+    "user@REALM.COM",
+    "/path/to/user.keytab",
+    "/etc/krb5.conf",
+    "/tmp/krb5cc_" + System.getProperty("user.name")
+);
+
+try {
+    // 使用方法同上
+    ...
+} catch (LoginException e) {
+    e.printStackTrace();
+}
+```
+
 ## 注意事项
 
 1. 确保系统上已正确安装和配置了Kerberos客户端
 2. keytab文件需要妥善保管，避免泄露
 3. 建议在生产环境中使用缓存机制，减少对keytab文件的访问
 4. 在多线程环境中，建议为每个线程创建独立的客户端实例
+5. 推荐使用配置文件方式创建客户端，便于统一管理配置
 
 ## 系统要求
 

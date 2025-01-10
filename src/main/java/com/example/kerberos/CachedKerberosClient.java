@@ -21,6 +21,19 @@ public class CachedKerberosClient {
     private boolean useKeytab;
 
     /**
+     * 从配置文件创建一个新的 CachedKerberosClient 实例
+     */
+    public CachedKerberosClient() {
+        KerberosConfig config = new KerberosConfig();
+        this.principal = config.getPrincipal();
+        this.keytabPath = config.getKeytabPath();
+        this.krb5ConfPath = config.getKrb5ConfPath();
+        this.ticketCachePath = "/tmp/krb5cc_" + System.getProperty("user.name");
+        this.loginContextName = "KerberosLogin-" + UUID.randomUUID().toString();
+        this.useKeytab = true;
+    }
+
+    /**
      * 创建一个新的 CachedKerberosClient 实例
      * @param principal Kerberos principal
      * @param keytabPath keytab文件路径
@@ -33,7 +46,7 @@ public class CachedKerberosClient {
         this.krb5ConfPath = krb5ConfPath;
         this.ticketCachePath = ticketCachePath;
         this.loginContextName = "KerberosLogin-" + UUID.randomUUID().toString();
-        this.useKeytab = true; // 默认使用keytab
+        this.useKeytab = true;
     }
 
     /**
@@ -138,14 +151,8 @@ public class CachedKerberosClient {
 
     // 使用示例
     public static void main(String[] args) {
-        String ticketCache = "/tmp/krb5cc_" + System.getProperty("user.name");
-        
-        CachedKerberosClient client = new CachedKerberosClient(
-            "user@REALM.COM",
-            "/path/to/user.keytab",
-            "/etc/krb5.conf",
-            ticketCache
-        );
+        // 使用配置文件创建客户端实例
+        CachedKerberosClient client = new CachedKerberosClient();
 
         try {
             // 首次使用keytab登录并缓存ticket
